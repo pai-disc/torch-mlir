@@ -21,7 +21,12 @@
 #include "mlir-c/Diagnostics.h"
 #include "torch-mlir-c/TorchTypes.h"
 
+#if defined(PYTORCH_MAJOR_VERSION) && defined(PYTORCH_MINOR_VERSION) &&        \
+    PYTORCH_MAJOR_VERSION == 1 && PYTORCH_MINOR_VERSION < 12
+// do nothing
+#else
 #include "ATen/native/quantized/packed_params.h"
+#endif
 #include "caffe2/core/scope_guard.h"
 
 using namespace torch_mlir;
@@ -331,6 +336,10 @@ MlirValue IValueImporter::rawImportIValue(c10::IValue ivalue) {
                                  torchMlirTorchNoneTypeGet(context));
     return mlirOperationGetResult(operation, 0);
   }
+#if defined(PYTORCH_MAJOR_VERSION) && defined(PYTORCH_MINOR_VERSION) &&        \
+    PYTORCH_MAJOR_VERSION == 1 && PYTORCH_MINOR_VERSION < 12
+  // do nothing
+#else
   if (ivalue.isCustomClass()) {
     if (ivalue.type().get() ==
         c10::getCustomClassType<c10::intrusive_ptr<LinearPackedParamsBase>>()
@@ -351,6 +360,7 @@ MlirValue IValueImporter::rawImportIValue(c10::IValue ivalue) {
       return mlirOperationGetResult(operation, 0);
     }
   }
+#endif
   std::stringstream msg;
   msg << "Unsupported ivalue: " << ivalue;
   throw std::invalid_argument(msg.str());
