@@ -23,6 +23,15 @@
 #include "torch-mlir-c/TorchTypes.h"
 
 using namespace torch_mlir;
+std::shared_ptr<torch::jit::Graph>
+torch_mlir::getGraphFromFunction(torch::jit::Function *function) {
+#if defined(PYTORCH_MAJOR_VERSION) && defined(PYTORCH_MINOR_VERSION) &&        \
+    PYTORCH_MAJOR_VERSION == 1 && PYTORCH_MINOR_VERSION < 11
+  return function->graph();
+#else
+  return toGraphFunction(*function).graph();
+#endif
+}
 
 static MlirType getMlirTypeForTorchScalarTypeRaw(MlirContext context,
                                                  c10::ScalarType scalarType) {
@@ -182,6 +191,10 @@ MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
     return torchMlirTorchTupleTypeGet(context, containedTypes.size(),
                                       containedTypes.data());
   }
+#if defined(PYTORCH_MAJOR_VERSION) && defined(PYTORCH_MINOR_VERSION) &&        \
+    PYTORCH_MAJOR_VERSION == 1 && PYTORCH_MINOR_VERSION < 10
+// do nothing
+#else
   case TypeKind::UnionType: {
     std::vector<MlirType> containedTypes;
     for (const c10::TypePtr &type :
@@ -191,6 +204,7 @@ MlirType torch_mlir::getMlirTypeFromTorchType(MlirLocation loc,
     return torchMlirTorchUnionTypeGet(context, containedTypes.size(),
                                       containedTypes.data());
   }
+#endif
   case TypeKind::ListType: {
     return torchMlirTorchListTypeGet(getMlirTypeFromTorchType(
         loc, torchType->cast<c10::ListType>()->getElementType()));
