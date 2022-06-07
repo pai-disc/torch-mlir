@@ -20,6 +20,10 @@
 
 namespace torch_mlir {
 
+#define TORCH_VERSION_LT(major, minor)                                         \
+  (defined(PYTORCH_MAJOR_VERSION) && defined(PYTORCH_MINOR_VERSION) &&         \
+   (PYTORCH_MAJOR_VERSION == major && PYTORCH_MINOR_VERSION < minor))
+
 std::shared_ptr<torch::jit::Graph>
 getGraphFromFunction(torch::jit::Function *function);
 
