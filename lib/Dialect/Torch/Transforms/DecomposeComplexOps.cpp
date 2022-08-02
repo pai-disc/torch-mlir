@@ -222,7 +222,6 @@ public:
 };
 } // namespace
 
-
 namespace {
 class DecomposeAtenZeroFunctionalOp
     : public OpRewritePattern<AtenZeroFunctionalOp> {
@@ -1336,6 +1335,7 @@ static LogicalResult decomposeBernoulliLikeOp(PatternRewriter &rewriter,
                                               Value input, Value prob,
                                               Value &output) {
   auto inputType = input.getType().cast<BaseTensorType>();
+  auto inputDtype = inputType.getDtype();
   auto probType = prob.getType().cast<BaseTensorType>();
   // Both the `input` and `prob` must be ranked tensors.
   if (!inputType.hasSizes() || !inputType.hasDtype() || !probType.hasSizes() ||
@@ -1351,25 +1351,14 @@ static LogicalResult decomposeBernoulliLikeOp(PatternRewriter &rewriter,
 
   // Since the `aten.rand_like` op expects float-type operand, create a
   // float-type tensor with the same shape as that of the `input`.
-  auto getWidth = [&](Operation *op, Type dType) {
-    if (auto floatDtype = dType.dyn_cast<mlir::FloatType>()) {
-      return floatDtype.getWidth();
-    } else if(auto intDtype = dType.dyn_cast<mlir::IntegerType>()) {
-      return intDtype.getWidth();
-    } else {
-      op->emitError("only supported dtype [float, integer]");
-    }
-  };
-
-  Value floatTensor;
-  if (getWidth(op, inputType.getDtype()) < 64) {
-    floatTensor =
-      convertTensorToDtype(rewriter, loc, input, rewriter.getF32Type());
-  } else {
-    floatTensor =
-      convertTensorToDtype(rewriter, loc, input, rewriter.getF64Type());
+  Type floatDtype = rewriter.getF64Type();
+  if (inputDtype.isa<mlir::FloatType>() &&
+        inputDtype.cast<mlir::FloatType>().getWidth() < 64) {
+      floatDtype = rewriter.getF32Type();
   }
 
+  Value floatTensor =
+      convertTensorToDtype(rewriter, loc, input, floatDtype);
   Value none = rewriter.create<ConstantNoneOp>(loc);
   Value randomVal = rewriter.create<AtenRandLikeOp>(
       loc, floatTensor.getType(), floatTensor, /*dtype=*/none, /*layout=*/none,
@@ -1383,7 +1372,7 @@ static LogicalResult decomposeBernoulliLikeOp(PatternRewriter &rewriter,
 
   // As the `output` is expected to be of the `input` type, convert the boolean
   // tensor `lessThanP` to a `input` type tensor.
-  output = convertTensorToDtype(rewriter, loc, lessThanP, inputType.getDtype());
+  output = convertTensorToDtype(rewriter, loc, lessThanP, inputDtype);
   return success();
 }
 
