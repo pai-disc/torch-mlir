@@ -170,6 +170,7 @@ enum ReductionType { MAX, MEAN, MIN, SUM, PROD };
 
 ReductionType get_reduction_enum(const llvm::StringRef &reduce);
 
+ScalarType promoteTypes(ScalarType a, ScalarType b);
 } // namespace torch_upstream
 } // namespace torch
 } // namespace mlir

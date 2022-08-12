@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "stablehlo/dialect/StablehloOps.h"
+#include "torch-mlir/Conversion/TorchToStablehlo/StablehloLegalizeUtils.h"
 #include "torch-mlir/Conversion/Utils/Utils.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchDialect.h"
 #include "torch-mlir/Dialect/Torch/IR/TorchOps.h"
@@ -22,7 +23,6 @@
 #include "torch-mlir/Dialect/Torch/Utils/Utils.h"
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionDialect.h"
 #include "torch-mlir/Dialect/TorchConversion/IR/TorchConversionOps.h"
-#include "torch-mlir/Conversion/TorchToStablehlo/StablehloLegalizeUtils.h"
 #include <numeric>
 
 using namespace mlir;
@@ -179,7 +179,12 @@ public:
 
     auto loc = op.getLoc();
     auto newRank = dimSizes.size();
-    if (newRank == 0 || rankType.getRank() == 0) {
+    auto outType =
+        OpConversionPattern<AtenOpT>::getTypeConverter()->convertType(
+            op.getType());
+    bool isStaticShape =
+        outType.template dyn_cast<RankedTensorType>().getNumDynamicDims() == 0;
+    if ((newRank == 0 || rankType.getRank() == 0) && isStaticShape) {
       rewriter.replaceOpWithNewOp<stablehlo::ReshapeOp>(
           op,
           OpConversionPattern<AtenOpT>::getTypeConverter()->convertType(
@@ -208,12 +213,15 @@ public:
 
     Value numel = rewriter.create<arith::ConstantOp>(
         loc, rewriter.getIntegerAttr(intType, 1));
-    for (auto d : dimSizes) {
-      numel = rewriter.create<arith::MulIOp>(loc, numel, d);
+    auto rank = rankType.getRank();
+    for (size_t d = 0; d < rank; ++d) {
+      Value dimSize = rewriter.create<arith::IndexCastOp>(
+          loc, intType,
+          rewriter.create<tensor::DimOp>(loc, adaptor.getSelf(), d));
+      numel = rewriter.create<arith::MulIOp>(loc, numel, dimSize);
     }
     numel = rewriter.create<arith::IndexCastOp>(loc, rewriter.getIndexType(),
                                                 numel);
-
     if (dimSizes.size() == 0) {
       rewriter.replaceOpWithNewOp<stablehlo::ReshapeOp>(
           op,
@@ -237,7 +245,7 @@ public:
   bool getAtenViewOpSizes(AtenOpT op, OpAdaptor adaptor,
                           ConversionPatternRewriter &rewriter,
                           SmallVector<Value, 4> &dimSizes) const;
-};
+}; // namespace
 
 template <>
 bool ConvertAtenViewOp<AtenViewOp>::getAtenViewOpSizes(
@@ -366,7 +374,8 @@ LogicalResult ConvertAtenOp<AtenSqueezeDimOp>::matchAndRewrite(
       return rewriter.notifyMatchFailure(
           op, "the size of the dimension being squeezed is can't be unknown");
 
-    rewriter.replaceOp(op, adaptor.getSelf());
+    rewriter.replaceOpWithNewOp<tensor::CastOp>(
+        op, getTypeConverter()->convertType(op.getType()), adaptor.getSelf());
     return success();
   }
 
@@ -403,7 +412,8 @@ LogicalResult ConvertAtenOp<AtenUnsqueezeOp>::matchAndRewrite(
   int64_t dim;
   if (!matchPattern(op.getDim(), m_TorchConstantInt(&dim)))
     return op->emitError("dim must be a Scalar constant");
-  int64_t inputRank = adaptor.getSelf().getType().cast<RankedTensorType>().getRank();
+  int64_t inputRank =
+      adaptor.getSelf().getType().cast<RankedTensorType>().getRank();
   dim = toPositiveDim(dim, inputRank + 1);
   if (!isValidDim(dim, inputRank + 1))
     return rewriter.notifyMatchFailure(op, "dim is statically invalid");
@@ -413,8 +423,8 @@ LogicalResult ConvertAtenOp<AtenUnsqueezeOp>::matchAndRewrite(
   if (failed(unsqzTensorInfo))
     return rewriter.notifyMatchFailure(op,
                                        "failed to create unsqueezed tensor");
-
-  rewriter.replaceOp(op, *unsqzTensorInfo);
+  rewriter.replaceOpWithNewOp<tensor::CastOp>(
+      op, getTypeConverter()->convertType(op.getType()), *unsqzTensorInfo);
   return success();
 }
 

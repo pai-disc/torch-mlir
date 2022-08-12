@@ -104,6 +104,7 @@ cc_library(
     deps = [
         ":MLIRTorchOpsIncGen",
         ":MLIRTorchTypesIncGen",
+        "@llvm-project//mlir:CastInterfaces",
         "@llvm-project//mlir:ControlFlowInterfaces",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:InferTypeOpInterface",
@@ -269,6 +270,7 @@ gentbl_cc_library(
             [
                 "-gen-pass-decls",
                 "-DTORCH_MLIR_ENABLE_STABLEHLO",
+                "-DTORCH_MLIR_ENABLE_MHLO_TRUNC_DIMSIZE_TO_I32",
             ],
             "include/torch-mlir/Conversion/Passes.h.inc",
         ),
@@ -441,6 +443,7 @@ cc_library(
         "lib/Conversion/TorchToStablehlo/*.cpp",
     ]),
     hdrs = glob(["include/torch-mlir/Conversion/TorchToStablehlo/*.h"]),
+    copts = ['-DTORCH_MLIR_ENABLE_MHLO_TRUNC_DIMSIZE_TO_I32'],
     strip_include_prefix = "include",
     deps = [
         ":TorchMLIRConversionPassesIncGen",
@@ -479,10 +482,14 @@ cc_library(
 
 cc_library(
     name = "TorchMLIRTorchConversionPasses",
-    srcs = glob([
-        "lib/Dialect/TorchConversion/Transforms/*.cpp",
-        "lib/Dialect/TorchConversion/Transforms/*.h",
-    ]),
+    srcs = glob(
+        [
+            "lib/Dialect/TorchConversion/Transforms/*.cpp",
+            "lib/Dialect/TorchConversion/Transforms/*.h",
+        ],
+        # Exclude the files belong to other targets.
+        exclude = ["lib/Dialect/TorchConversion/Transforms/BackendTypeConversion.cpp"],
+    ),
     hdrs = glob(["include/torch-mlir/Dialect/TorchConversion/Transforms/*.h"]),
     strip_include_prefix = "include",
     deps = [

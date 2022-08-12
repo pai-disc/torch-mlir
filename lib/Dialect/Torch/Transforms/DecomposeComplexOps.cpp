@@ -418,9 +418,10 @@ public:
   LogicalResult matchAndRewrite(AtenSoftmaxIntOp op,
                                 PatternRewriter &rewriter) const override {
     Value self = op.getSelf();
-    if (!op.getDtype().getType().isa<Torch::NoneType>())
-      return rewriter.notifyMatchFailure(
-          op, "Unimplemented non-None dtype for softmax");
+    // Do not need check dtype args here, since dtype have been infered in op.getType()
+    // if (!op.getDtype().getType().isa<Torch::NoneType>())
+    //   return rewriter.notifyMatchFailure(
+    //       op, "Unimplemented non-None dtype for softmax");
 
     BaseTensorType tensorType = self.getType().cast<BaseTensorType>();
     if (!tensorType.hasDtype() || !tensorType.getDtype().isa<mlir::FloatType>())
@@ -429,6 +430,12 @@ public:
     Value result = getSoftmaxResult(op, self, tensorType, rewriter);
     if (!result)
       return failure();
+
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
     rewriter.replaceOpWithNewOp<TensorStaticInfoCastOp>(op, op.getType(),
                                                         result);
     return success();
@@ -474,7 +481,13 @@ public:
     Value result = getSoftmaxResult(op, self, resultTensorType, rewriter);
     if (!result)
       return op.emitError("failed to get softmax result");
-    rewriter.replaceOpWithNewOp<TensorStaticInfoCastOp>(op, resultTensorType,
+
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
+    rewriter.replaceOpWithNewOp<TensorStaticInfoCastOp>(op, op.getType(),
                                                         result);
     return success();
   }
@@ -801,19 +814,21 @@ public:
   LogicalResult matchAndRewrite(AtenLogSoftmaxIntOp op,
                                 PatternRewriter &rewriter) const override {
     Value self = op.getSelf();
-    if (!op.getDtype().getType().isa<Torch::NoneType>())
-      return rewriter.notifyMatchFailure(
-          op, "Unimplemented non-None dtype for log_softmax");
-
     BaseTensorType tensorType = self.getType().cast<BaseTensorType>();
     if (!tensorType.hasDtype() || !tensorType.getDtype().isa<mlir::FloatType>())
       return rewriter.notifyMatchFailure(op, "Only support floating type");
 
-    Value logSoftmax = getLogSoftmaxResult(op, rewriter);
-    if (!logSoftmax)
+    Value result = getLogSoftmaxResult(op, rewriter);
+    if (!result)
       return rewriter.notifyMatchFailure(
           op, "getLogSoftmaxResult function returned nullptr");
-    rewriter.replaceOp(op, logSoftmax);
+
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -835,11 +850,18 @@ public:
     if (halfToFloat)
       return rewriter.notifyMatchFailure(
           op, "halfToFloat is currently not supported.");
-    Value _logSoftmax = getLogSoftmaxResult(op, rewriter);
-    if (!_logSoftmax)
+    Value result = getLogSoftmaxResult(op, rewriter);
+    if (!result)
       return rewriter.notifyMatchFailure(
           op, "getLogSoftmaxResult function returned nullptr");
-    rewriter.replaceOp(op, _logSoftmax);
+
+    BaseTensorType tensorType = op.getSelf().getType().cast<BaseTensorType>();
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -1141,11 +1163,14 @@ public:
     auto self = op.getSelf();
     auto selfTy = self.getType().cast<BaseTensorType>();
     // roll(input, shift, dim) = cat({
-    //   slice(input, dim, -shift, none),
-    //   slice(input, dim, 0, -shift)}, dim)
+    //   slice(input, dim, (dimSize-shift)%dimSize, none),
+    //   slice(input, dim, 0, (dimSize-shift)%dimSize}, dim)
     auto imitateRoll = [&](Value input, Value shift, Value dim,
                            int64_t cstDim) {
-      Value negShift = rewriter.create<AtenNegIntOp>(loc, shift);
+      Value dimSize = rewriter.create<AtenSizeIntOp>(loc, input, dim);
+      Value shiftPlus = rewriter.create<AtenSubIntOp>(loc, dimSize, shift);
+      Value splitPos =
+          rewriter.create<AtenRemainderIntOp>(loc, shiftPlus, dimSize);
       ArrayRef<int64_t> inputShape = selfTy.getSizes();
       SmallVector<int64_t> sizes;
       sizes.append(inputShape.begin(), inputShape.end());
@@ -1153,14 +1178,14 @@ public:
       Type sliceTy = selfTy.getWithSizesAndDtype(llvm::ArrayRef(sizes),
                                                  selfTy.getOptionalDtype());
       Value slice0 = rewriter.create<AtenSliceTensorOp>(
-          loc, sliceTy, input, dim, negShift, constNone, constOne);
+          loc, sliceTy, input, dim, splitPos, constNone, constOne);
       Value slice1 = rewriter.create<AtenSliceTensorOp>(
-          loc, sliceTy, input, dim, constZero, negShift, constOne);
+          loc, sliceTy, input, dim, constZero, splitPos, constOne);
 
       Type listType = Torch::ListType::get(sliceTy);
       Value slices = rewriter.create<PrimListConstructOp>(
           loc, listType, llvm::ArrayRef<Value>{slice0, slice1});
-      return rewriter.create<AtenCatOp>(loc, self.getType(), slices, dim);
+      return rewriter.create<AtenCatOp>(loc, op.getType(), slices, dim);
     };
     std::optional<unsigned> maybeRank = getTensorRank(self);
     if (!maybeRank)
@@ -2125,6 +2150,67 @@ public:
 };
 } // namespace
 
+// grad_output * mask * scale
+namespace {
+class DecomposeAtenNativeDropoutBackwardOp
+    : public OpRewritePattern<AtenNativeDropoutBackwardOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenNativeDropoutBackwardOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+
+    Value maskedGradOutput = rewriter.create<AtenMulTensorOp>(
+        loc, op.getType(), op.getGradOutput(), op.getMask());
+    rewriter.replaceOpWithNewOp<AtenMulScalarOp>(op, op.getType(),
+                                                 maskedGradOutput, op.getScale());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+class DecomposeAtenNativeDropoutOp : public OpRewritePattern<AtenNativeDropoutOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenNativeDropoutOp op,
+                                PatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Value input = op.getInput();
+    Value prob = op.getP();
+    bool train = false;
+    if (!matchPattern(op.getTrain(), m_TorchConstantBool(&train)))
+      return rewriter.notifyMatchFailure(op, "train must be a boolean constant");
+
+    BaseTensorType inputType = input.getType().cast<BaseTensorType>();
+    if (!train) {
+      // TODO(yancey.yx): supports inference mode
+      return op.emitError(
+          "native_dropout does not support argument train is false");
+    }
+    if (!inputType.hasDtype() || !inputType.getDtype().isa<mlir::FloatType>())
+      return rewriter.notifyMatchFailure(
+          op, "only support floating type input for training mode");
+    Value noneVal = rewriter.create<ConstantNoneOp>(loc);
+    Value floatOne =
+        rewriter.create<ConstantFloatOp>(loc, rewriter.getF64FloatAttr(1.0));
+    Value oneMinusP = rewriter.create<AtenSubFloatOp>(loc, floatOne, prob);
+    Value boolMask = rewriter.create<ValsemVariantAtenBernoulliFloatOp>(
+        loc, inputType, input, oneMinusP, /*generator=*/noneVal);
+    Value maskedInput =
+        rewriter.create<AtenMulTensorOp>(loc, inputType, boolMask, input);
+    Value output =
+        rewriter.create<AtenMulScalarOp>(loc, inputType, maskedInput, oneMinusP);
+    Value one =
+        rewriter.create<Torch::ConstantIntOp>(loc, rewriter.getI64IntegerAttr(1));
+    boolMask = rewriter.create<AtenGeScalarOp>(
+        loc, op.getResult(1).getType(), boolMask, one);
+    rewriter.replaceOp(op, {output, boolMask});
+  return success();
+  }
+};
+} // namespace
+
 // Decompose aten.var into: aten.var.dim op.
 namespace {
 class DecomposeAtenVarOp : public OpRewritePattern<AtenVarOp> {
@@ -2379,6 +2465,7 @@ static LogicalResult decomposeBernoulliLikeOp(PatternRewriter &rewriter,
                                               Value input, Value prob,
                                               Value &output) {
   auto inputType = input.getType().cast<BaseTensorType>();
+  auto inputDtype = inputType.getDtype();
   auto probType = prob.getType().cast<BaseTensorType>();
   // Both the `input` and `prob` must be ranked tensors.
   if (!inputType.hasSizes() || !inputType.hasDtype() || !probType.hasSizes() ||
@@ -2394,8 +2481,14 @@ static LogicalResult decomposeBernoulliLikeOp(PatternRewriter &rewriter,
 
   // Since the `aten.randLike` op expects float-type operand, create a
   // float-type tensor with the same shape as that of the `input`.
+  Type floatDtype = rewriter.getF64Type();
+  if (inputDtype.isa<mlir::FloatType>() &&
+        inputDtype.cast<mlir::FloatType>().getWidth() < 64) {
+      floatDtype = rewriter.getF32Type();
+  }
+
   Value floatTensor =
-      convertTensorToDtype(rewriter, loc, input, rewriter.getF64Type());
+      convertTensorToDtype(rewriter, loc, input, floatDtype);
   Value none = rewriter.create<ConstantNoneOp>(loc);
   Value randomVal = rewriter.create<AtenRandLikeOp>(
       loc, floatTensor.getType(), floatTensor, /*dtype=*/none, /*layout=*/none,
@@ -2409,7 +2502,7 @@ static LogicalResult decomposeBernoulliLikeOp(PatternRewriter &rewriter,
 
   // As the `output` is expected to be of the `input` type, convert the boolean
   // tensor `lessThanP` to a `input` type tensor.
-  output = convertTensorToDtype(rewriter, loc, lessThanP, inputType.getDtype());
+  output = convertTensorToDtype(rewriter, loc, lessThanP, inputDtype);
   return success();
 }
 
@@ -2542,6 +2635,214 @@ class DecomposeAtenLayerNormOp : public OpRewritePattern<AtenLayerNormOp> {
     return success();
   }
 };
+
+class DecomposeAtenGroupNormOp : public OpRewritePattern<AtenGroupNormOp> {
+  using OpRewritePattern<AtenGroupNormOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenGroupNormOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto context = op.getContext();
+    Value input = op.getInput();
+    auto inputTy = input.getType().cast<BaseTensorType>();
+    if (!inputTy.hasSizes())
+      return rewriter.notifyMatchFailure(
+          op, "input tensor should have known sizes.");
+    ArrayRef<int64_t> inputSize = inputTy.getSizes();
+    int64_t inputRank = inputTy.getSizes().size();
+    if (inputRank != 4) {
+      return rewriter.notifyMatchFailure(
+          op, "group norm only support 4D input now.");
+    }
+    Value num_groups = op.getNumGroups();
+    int64_t num_groups_int;
+    if (!matchPattern(num_groups, m_TorchConstantInt(&num_groups_int)))
+      return rewriter.notifyMatchFailure(
+          op, "non const num_groups for AtenGroupNormOp");
+
+    // reshape input -> [N, G, -1(G//C), H, W]
+    Value negOne =
+        rewriter.create<ConstantIntOp>(loc, rewriter.getI64IntegerAttr(-1));
+    Value one =
+        rewriter.create<ConstantIntOp>(loc, rewriter.getI64IntegerAttr(1));
+    Value none = rewriter.create<Torch::ConstantNoneOp>(loc);
+    SmallVector<int64_t, 5> inputForNormTySize(inputRank + 1, kUnknownSize);
+    inputForNormTySize[1] = num_groups_int;
+    Type inputForNormTy = inputTy.getWithSizesAndDtype(
+        llvm::makeArrayRef(inputForNormTySize), inputTy.getDtype());
+    SmallVector<Value> orginInputSize;
+    for (int i = 0; i < inputRank; ++i) {
+      Value index =
+          rewriter.create<ConstantIntOp>(loc, rewriter.getI64IntegerAttr(i));
+      orginInputSize.push_back(
+          rewriter.create<AtenSizeIntOp>(loc, input, index));
+    }
+    SmallVector<Value, 5> inputForNormSize{orginInputSize.begin(),
+                                           orginInputSize.end()};
+    inputForNormSize.insert(inputForNormSize.begin() + 1, num_groups);
+    inputForNormSize[2] = negOne;
+    Value inputForNormSizeList = rewriter.create<PrimListConstructOp>(
+        loc, ListType::get(IntType::get(context)), inputForNormSize);
+    Value reshapedInput = rewriter.create<AtenViewOp>(
+        loc, inputForNormTy, input, inputForNormSizeList);
+    // only keep N, G, reduce G//C, H, W
+    int64_t axis = 2;
+    std::vector<int64_t> meanVarTySizes(inputForNormTySize.size(), 1);
+    for (int i = 0; i < axis; i++)
+      meanVarTySizes[i] = inputForNormTySize[i];
+    auto meanVarTy = inputTy.getWithSizesAndDtype(
+        llvm::makeArrayRef(meanVarTySizes), inputTy.getDtype());
+    SmallVector<Value> normalizedShapeSize{inputForNormSize.begin() + axis,
+                                           inputForNormSize.end()};
+    auto normalizedSizeList = rewriter.create<PrimListConstructOp>(
+        loc, ListType::get(IntType::get(context)), normalizedShapeSize);
+
+    auto nativeLayerNorm =
+        rewriter
+            .create<AtenNativeLayerNormOp>(
+                loc, inputForNormTy, meanVarTy, meanVarTy, reshapedInput,
+                normalizedSizeList, none, none, op.getEps())
+            .getResult(0);
+    // rehshape back to origin shape
+    Value inputSizeList = rewriter.create<PrimListConstructOp>(
+        loc, ListType::get(IntType::get(context)), orginInputSize);
+    Value originOutput = rewriter.create<AtenViewOp>(
+        loc, op.getType(), nativeLayerNorm, inputSizeList);
+    // reshape weight and bias to [1, C, 1, 1]
+    Value weight = op.getWeight();
+    Value bias = op.getBias();
+    if (!weight.getType().isa<Torch::NoneType>() ||
+        !bias.getType().isa<Torch::NoneType>()) {
+      SmallVector<Value> weightsAndBiasSize(inputRank - 1, one);
+      weightsAndBiasSize[0] = orginInputSize[1];
+
+      SmallVector<int64_t> weightsAndBiasTySize(inputRank - 1, kUnknownSize);
+      // weightsAndBiasTySize[1] = kUnknownSize;
+
+      Value weightsAndBiasSizeList = rewriter.create<PrimListConstructOp>(
+          loc, ListType::get(IntType::get(context)), weightsAndBiasSize);
+      if (!weight.getType().isa<Torch::NoneType>()) {
+        BaseTensorType weightType = weight.getType().cast<BaseTensorType>();
+        Type weightTy = weightType.getWithSizesAndDtype(
+            llvm::makeArrayRef(weightsAndBiasTySize), weightType.getDtype());
+        weight = rewriter.create<AtenViewOp>(loc, weightTy, weight,
+                                             weightsAndBiasSizeList);
+        originOutput = rewriter.create<AtenMulTensorOp>(loc, op.getType(),
+                                                        originOutput, weight);
+      }
+      if (!bias.getType().isa<Torch::NoneType>()) {
+        BaseTensorType biasType = bias.getType().cast<BaseTensorType>();
+        Type biasTy = biasType.getWithSizesAndDtype(
+            llvm::makeArrayRef(weightsAndBiasTySize), biasType.getDtype());
+        bias = rewriter.create<AtenViewOp>(loc, biasTy, bias,
+                                           weightsAndBiasSizeList);
+        Value alpha =
+            rewriter.create<ConstantFloatOp>(loc, rewriter.getF64FloatAttr(1));
+        originOutput = rewriter.create<AtenAddTensorOp>(
+            loc, op.getType(), originOutput, bias, alpha);
+      }
+    }
+    rewriter.replaceOp(op, {originOutput});
+    return success();
+  }
+};
+
+} // namespace
+
+namespace {
+class DecomposeAtenNativeLayerNormBackwardOp
+    : public OpRewritePattern<AtenNativeLayerNormBackwardOp> {
+  using OpRewritePattern<AtenNativeLayerNormBackwardOp>::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenNativeLayerNormBackwardOp op,
+                                PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    auto context = op.getContext();
+
+    auto inputTy = op.getInput().getType().cast<BaseTensorType>();
+    if (!inputTy.hasSizes())
+      return rewriter.notifyMatchFailure(
+          op, "input tensor should have known sizes.");
+    int64_t inputRank = inputTy.getSizes().size();
+    Value normalizedShape = op.getNormalizedShape();
+    SmallVector<Value> normalizedShapeSizesTorchInt;
+    getListConstructElements(normalizedShape, normalizedShapeSizesTorchInt);
+    int64_t axis = inputRank - normalizedShapeSizesTorchInt.size();
+    auto reduceDimInts = llvm::to_vector<4>(llvm::seq<int64_t>(axis, inputRank));
+    auto outerDimInts = llvm::to_vector<4>(llvm::seq<int64_t>(0, axis));
+    auto reducedTy = op.getResult(1).getType();
+    auto sizeListType = ListType::get(IntType::get(context));
+
+    auto fromIntsToList = [&](ArrayRef<int64_t> dimInts) -> Value {
+      SmallVector<Value> dimVals;
+      dimVals.reserve(dimInts.size());
+      std::transform(dimInts.begin(), dimInts.end(),
+                     std::back_inserter(dimVals), [&](int64_t d) {
+                       return rewriter.create<Torch::ConstantIntOp>(
+                           loc, rewriter.getI64IntegerAttr(d));
+                     });
+      Value dimList =
+          rewriter.create<PrimListConstructOp>(loc, sizeListType, dimVals);
+      return dimList;
+    };
+    // build reduce & outer dims
+    auto reduceDimList = fromIntsToList(reduceDimInts);
+    auto outerDimList = fromIntsToList(outerDimInts);
+    Value one = rewriter.create<Torch::ConstantIntOp>(
+        loc, rewriter.getI64IntegerAttr(1));
+
+    Value cstFalse = rewriter.create<Torch::ConstantBoolOp>(loc, false);
+    Value none = rewriter.create<Torch::ConstantNoneOp>(loc);
+
+    // x_hat
+    Value inputSubMean = rewriter.create<AtenSubTensorOp>(
+        loc, inputTy, op.getInput(), op.getMean(), one);
+    Value xHat =
+        rewriter.create<AtenMulTensorOp>(loc, inputTy, inputSubMean, op.getRstd());
+
+    // grad(x_hat)
+    Value xHatGrad = op.getGradOut();
+    Value weight = op.getWeight();
+    Value wGrad = none;
+    if (!weight.getType().isa<Torch::NoneType>()) {
+      xHatGrad = rewriter.create<AtenMulTensorOp>(loc, xHatGrad.getType(),
+                                                  xHatGrad, weight);
+      wGrad = rewriter.create<AtenSumDimIntListOp>(
+          loc, weight.getType(),
+          rewriter.create<AtenMulTensorOp>(loc, inputTy, op.getGradOut(), xHat),
+          outerDimList, cstFalse, none);
+    }
+    Value bias = op.getBias();
+    Value bGrad = none;
+    if (!bias.getType().isa<Torch::NoneType>()) {
+      bGrad = rewriter.create<AtenSumDimIntListOp>(
+          loc, bias.getType(), op.getGradOut(), outerDimList, cstFalse, none);
+    }
+
+    Value cstTrue = rewriter.create<Torch::ConstantBoolOp>(loc, true);
+    // grad(mean)
+    Value meanGrad = rewriter.create<AtenMeanDimOp>(
+        loc, op.getMean().getType(), xHatGrad, reduceDimList, cstTrue, none);
+    // grad(rstd)
+    Value xHatGradMulXHat =
+        rewriter.create<AtenMulTensorOp>(loc, inputTy, xHatGrad, xHat);
+    Value rstdGrad0 = rewriter.create<AtenMeanDimOp>(
+        loc, op.getRstd().getType(), xHatGradMulXHat, reduceDimList, cstTrue,
+        none);
+    Value rstdGrad1 =
+        rewriter.create<AtenMulTensorOp>(loc, inputTy, xHat, rstdGrad0);
+
+    // grad(input)
+    Value inner =
+        rewriter.create<AtenSubTensorOp>(loc, inputTy, xHatGrad, meanGrad, one);
+    inner =
+        rewriter.create<AtenSubTensorOp>(loc, inputTy, inner, rstdGrad1, one);
+    Value gradInput =
+        rewriter.create<AtenMulTensorOp>(loc, inputTy, op.getRstd(), inner);
+
+    rewriter.replaceOp(op, {gradInput, wGrad, bGrad});
+
+    return success();
+  }
+};
 } // namespace
 
 namespace {
@@ -2620,7 +2921,6 @@ class DecomposeAtenNativeLayerNormOp
           rewriter.create<AtenAddTensorOp>(loc, out.getType(), out, bias, one);
     }
     rewriter.replaceOp(op, {out, inputMean, inputRsqrtVar});
-
     return success();
   }
 };
@@ -2706,6 +3006,24 @@ class DecomposeConstantTensorAllocLikeOp : public OpRewritePattern<OpTy> {
 } // namespace
 
 namespace {
+// Decompose constant tensor full like ops.
+template <typename OpTy, int fillVal>
+class DecomposeConstantTensorAllocOp : public OpRewritePattern<OpTy> {
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+  LogicalResult matchAndRewrite(OpTy op,
+                                PatternRewriter &rewriter) const override {
+    Type resultDtype = op.getType().template cast<BaseTensorType>().getDtype();
+    Value constVal = getConstantWithGivenDtypeAndValue(rewriter, op.getLoc(),
+                                                       fillVal, resultDtype);
+    rewriter.replaceOpWithNewOp<AtenFullOp>(
+        op, op.getType(), op.getSize(), constVal, op.getDtype(), op.getLayout(),
+        op.getDevice(), op.getPinMemory());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
 class DecomposeAtenNativeBatchNormOp
     : public OpRewritePattern<AtenNativeBatchNormOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -2762,6 +3080,7 @@ class DecomposeAtenNativeBatchNormOp
     // to make it broadcast-compatible with (N, C, D?, H?, W?).
     // 1. runningMean = runningMean.view(1, C, 1?, 1?, 1?)
     // 2. runningVar = runningVar.view(1, C, 1?, 1?, 1?)
+
     SmallVector<Value> runningStatsShape(inputRank, one);
     runningStatsShape[1] = numFeatures;
     Value runningStatsSizeList = rewriter.create<PrimListConstructOp>(
@@ -2773,11 +3092,29 @@ class DecomposeAtenNativeBatchNormOp
     Type reshapeType = ValueTensorType::get(
         context, llvm::ArrayRef(runningStatsShapeInt), dtype);
 
-    runningMean = rewriter.create<AtenViewOp>(loc, reshapeType, runningMean,
-                                              runningStatsSizeList);
-    runningVar = rewriter.create<AtenViewOp>(loc, reshapeType, runningVar,
-                                             runningStatsSizeList);
+    auto convertRuningStat = [&](Value runningStat) -> Value {
+      Type runningStatDtype =
+          runningStat.getType().cast<ValueTensorType>().getDtype();
+      runningStat = rewriter.create<AtenViewOp>(
+          loc,
+          ValueTensorType::get(context,
+                               llvm::makeArrayRef(runningStatsShapeInt),
+                               runningStatDtype),
+          runningStat, runningStatsSizeList);
 
+      if (dtype != runningStatDtype) {
+        Value cstFalse = rewriter.create<Torch::ConstantBoolOp>(loc, false);
+        Value none = rewriter.create<ConstantNoneOp>(loc);
+        return rewriter.create<AtenToDtypeOp>(
+            loc, reshapeType, runningStat,
+            getDtypeIntValueForType(rewriter, loc, dtype),
+            /*non_blocking=*/cstFalse, /*copy=*/cstFalse,
+            /*memory_format=*/none);
+      }
+      return runningStat;
+    };
+    runningMean = convertRuningStat(runningMean);
+    runningVar = convertRuningStat(runningVar);
     // normalizedInput = (input - runningMean) / (sqrt(runningVar + eps)).
     Value inputSubMean = rewriter.create<AtenSubTensorOp>(
         loc, input.getType(), input, runningMean, /*alpha=*/one);
@@ -2785,7 +3122,7 @@ class DecomposeAtenNativeBatchNormOp
         loc, runningVar.getType(), runningVar, eps, /*alpha=*/one);
     Value invStd = rewriter.create<AtenRsqrtOp>(loc, varEps.getType(), varEps);
     Value normalizedInput = rewriter.create<AtenMulTensorOp>(
-        loc, inputSubMean.getType(), inputSubMean, invStd);
+        loc, op.getType(0), inputSubMean, invStd);
 
     // The `weight` and `bias` must be reshaped to (1, C, 1?, 1?, 1?) to make it
     // broadcast-compatible with (N, C, D?, H?, W?).
@@ -2798,20 +3135,18 @@ class DecomposeAtenNativeBatchNormOp
       std::optional<unsigned> weightRank = getTensorRank(weight);
       if (!weightRank || *weightRank != 1)
         return rewriter.notifyMatchFailure(op, "expected weight to be rank 1");
-      weight = rewriter.create<AtenViewOp>(loc, reshapeType, weight,
-                                           runningStatsSizeList);
+      weight = convertRuningStat(weight);
       batchNormOutput = rewriter.create<AtenMulTensorOp>(
-          loc, batchNormOutput.getType(), batchNormOutput, weight);
+          loc, op.getType(0), batchNormOutput, weight);
     }
     if (!bias.getType().isa<Torch::NoneType>()) {
       // Rank of `bias` must be exactly 1.
       std::optional<unsigned> biasRank = getTensorRank(bias);
       if (!biasRank || *biasRank != 1)
         return rewriter.notifyMatchFailure(op, "expected bias to be rank 1");
-      bias = rewriter.create<AtenViewOp>(loc, reshapeType, bias,
-                                         runningStatsSizeList);
+      bias = convertRuningStat(bias);
       batchNormOutput = rewriter.create<AtenAddTensorOp>(
-          loc, batchNormOutput.getType(), batchNormOutput, bias, /*alpha=*/one);
+          loc, op.getType(0), batchNormOutput, bias, /*alpha=*/one);
     }
 
     // The `mean` and `invstd` outputs are empty tensors in inference mode.
@@ -2895,6 +3230,24 @@ class DecomposeConstantTensorNewLikeOp : public OpRewritePattern<OpTy> {
     }
     rewriter.replaceOpWithNewOp<NewOpTy>(op, op.getType(), op.getSize(), dtype,
                                          op.getLayout(), op.getDevice(),
+                                         op.getPinMemory());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// Decompose constant tensor like ops.
+template <typename OpTy, typename NewOpTy, int val>
+class DecomposeConstantTensorOp : public OpRewritePattern<OpTy> {
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+  LogicalResult matchAndRewrite(OpTy op,
+                                PatternRewriter &rewriter) const override {
+    Type resultDtype = op.getType().template cast<BaseTensorType>().getDtype();
+    Value fillVal = getConstantWithGivenDtypeAndValue(rewriter, op.getLoc(),
+                                                      val, resultDtype);
+    rewriter.replaceOpWithNewOp<NewOpTy>(op, op.getType(), op.size(), fillVal,
+                                         op.getDtype(), op.getLayout(), op.getDevice(),
                                          op.getPinMemory());
     return success();
   }
@@ -3671,6 +4024,128 @@ public:
     rewriter.replaceOpWithNewOp<AtenSliceScatterOp>(
         op, op.getSelf().getType(), self, src, dim, start, startPlusOne,
         /*step=*/one);
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+// def slice_scatter(self, values, dim, start, end, step):
+//     size = self.size(dim)
+//     indices = torch.arange(size)
+//     shift_indices = indices - start
+//     mask = shift_indices % step == 0
+//     start_mask = shift_indices >= 0
+//     end_mask = shift_indices < end
+//     mask = mask * start_mask
+//     mask = mask * end_mask
+//     sizes = list(self.size())
+//     rank = len(sizes)
+//     shape = [1] * rank
+//     shape[dim] = size
+//     mask = mask.view(shape)
+//     return torch.where(mask, values, self)
+//
+class DecomposeAtenSliceScatterOp
+    : public OpRewritePattern<AtenSliceScatterOp> {
+public:
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(AtenSliceScatterOp op,
+                                PatternRewriter &rewriter) const override {
+    int64_t inputRank = *getTensorRank(op.getSelf());
+    int64_t dimInt = 0;
+    if (matchPattern(op.getDim(), m_TorchConstantInt(&dimInt))) {
+      dimInt = toPositiveDim(dimInt, inputRank);
+      if (!isValidDim(dimInt, inputRank))
+        return rewriter.notifyMatchFailure(op, "dim is not a valid dim");
+    } else {
+      return rewriter.notifyMatchFailure(op, "dim must be constant");
+    }
+
+    auto getOptionalVal = [&](Value val, Value defVal) -> Value {
+      if (val.getType().isa<Torch::NoneType>()) {
+        return defVal;
+      } else {
+        return val;
+      }
+    };
+
+    Value one = rewriter.create<Torch::ConstantIntOp>(
+        op.getLoc(), rewriter.getI64IntegerAttr(1));
+    Value zero = rewriter.create<Torch::ConstantIntOp>(
+        op.getLoc(), rewriter.getI64IntegerAttr(0));
+    Value none = rewriter.create<ConstantNoneOp>(op.getLoc());
+    Value dimSize =
+        rewriter.create<AtenSizeIntOp>(op.getLoc(), op.getSelf(), op.getDim());
+
+    Value start = getOptionalVal(op.getStart(), zero);
+    Value end = getOptionalVal(op.getEnd(), dimSize);
+    Value step = getOptionalVal(op.getStep(), one);
+    // Step 0. create indices
+    Type indicesType = ValueTensorType::get(
+        op.getContext(), ArrayRef<int64_t>{kUnknownSize},
+        IntegerType::get(op.getContext(), 64, IntegerType::Signed));
+    Value indices = rewriter.create<AtenArangeOp>(
+        op.getLoc(), indicesType, dimSize, none, none, none, none);
+
+    // Step 1. make indices broadcastable to self's shape
+    SmallVector<int64_t> newIndicesShapeInt(inputRank, 1);
+    SmallVector<Value> newIndicesShape(inputRank, one);
+    newIndicesShape[dimInt] = dimSize;
+    newIndicesShapeInt[dimInt] = kUnknownSize;
+    Value newIndicesSizeList = rewriter.create<PrimListConstructOp>(
+        op.getLoc(), ListType::get(IntType::get(op.getContext())),
+        newIndicesShape);
+    Type indicesDtype = indices.getType().cast<ValueTensorType>().getDtype();
+    Type newIndicesType = ValueTensorType::get(
+        op.getContext(), llvm::makeArrayRef(newIndicesShapeInt), indicesDtype);
+    indices = rewriter.create<AtenViewOp>(op.getLoc(), newIndicesType,
+                                                 indices, newIndicesSizeList);
+
+    // Step 2. calculate scatter indices mask
+    Type maskType = ValueTensorType::get(
+        op.getContext(), newIndicesType.cast<ValueTensorType>().getSizes(),
+        IntegerType::get(op.getContext(), 1));
+    auto shiftIndices = rewriter.create<AtenSubScalarOp>(
+        op.getLoc(), indices.getType(), indices, start, one);
+    auto stepRemainder = rewriter.create<AtenRemainderScalarOp>(
+        op.getLoc(), indices.getType(), shiftIndices, step);
+    Value mask = rewriter.create<AtenEqScalarOp>(op.getLoc(), maskType,
+                                                 stepRemainder, zero);
+    auto maskStart = rewriter.create<AtenGeScalarOp>(op.getLoc(), maskType,
+                                                     shiftIndices, zero);
+    auto maskEnd =
+        rewriter.create<AtenLtScalarOp>(op.getLoc(), maskType, indices, end);
+    mask = rewriter.create<AtenBitwiseAndTensorOp>(op.getLoc(), maskType, mask,
+                                                   maskStart);
+    mask = rewriter.create<AtenBitwiseAndTensorOp>(op.getLoc(), maskType, mask,
+                                                   maskEnd);
+
+    // Step 3. make src broadcastable to self's shape
+    Value src = op.getSrc();
+    BaseTensorType srcTensorType = src.getType().cast<BaseTensorType>();
+    if (!srcTensorType.hasSizes())
+      return rewriter.notifyMatchFailure(op, "src tensor must have size");
+
+    ArrayRef<int64_t> srcShape = srcTensorType.getSizes();
+    int64_t srcRank = srcShape.size();
+    if (srcRank != inputRank) {
+      if (srcRank + 1 == inputRank) {
+        SmallVector<int64_t> sizes;
+        sizes.append(srcShape.begin(), srcShape.end());
+        sizes.insert(sizes.begin() + dimInt, 1);
+        Type srcType = srcTensorType.getWithSizesAndDtype(
+            llvm::makeArrayRef(sizes), srcTensorType.getDtype());
+        src = rewriter.create<AtenUnsqueezeOp>(op.getLoc(), srcType, src,
+                                               op.getDim());
+      } else {
+        return rewriter.notifyMatchFailure(op, "src's rank doesn't match");
+      }
+    }
+
+    // Step 4. replace output = mask? src: self
+    rewriter.replaceOpWithNewOp<AtenWhereSelfOp>(op, op.getType(), mask,
+                                                 src, op.getSelf());
     return success();
   }
 };
@@ -4563,6 +5038,7 @@ public:
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
+
     // The strings in the `legalOps` ArrayRef don't exist during the call to the
     // constructor `DecomposeComplexOpsPass`, so the creation of the
     // `legalOpsSet` must be delayed to when `runOnOperation` gets called.
@@ -4579,6 +5055,10 @@ public:
     addPatternIfTargetOpIsIllegal<
         DecomposeConstantTensorAllocLikeOp<AtenZerosLikeOp, 0>>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenStackOp>(patterns);
+    addPatternIfTargetOpIsIllegal<
+        DecomposeConstantTensorAllocOp<AtenOnesOp, 1>>(patterns);
+    addPatternIfTargetOpIsIllegal<
+        DecomposeConstantTensorAllocOp<AtenZerosOp, 0>>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenRollOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenRepeatOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenExpandOp>(patterns);
@@ -4701,6 +5181,11 @@ public:
     addPatternIfTargetOpIsIllegal<DecomposeAtenScalarTensor>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenScatterValueOp>(patterns);
     addPatternIfTargetOpIsIllegal<DecomposeAtenSignOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenNativeLayerNormBackwardOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenNativeDropoutOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenNativeDropoutBackwardOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenSliceScatterOp>(patterns);
+    addPatternIfTargetOpIsIllegal<DecomposeAtenGroupNormOp>(patterns);
 
     GreedyRewriteConfig config;
     config.useTopDownTraversal = true;

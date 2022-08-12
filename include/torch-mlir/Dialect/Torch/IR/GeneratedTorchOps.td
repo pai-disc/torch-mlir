@@ -4929,6 +4929,65 @@ def Torch_AtenNativeLayerNormOp : Torch_Op<"aten.native_layer_norm", [
   }];
 }
 
+def Torch_AtenInstanceNormOp : Torch_Op<"aten.instance_norm", [
+    AllowsTypeRefinement,
+    HasValueSemantics,
+    ReadOnly
+  ]> {
+  let summary = "Generated op for `aten::instance_norm : (Tensor, Tensor?, Tensor?, Tensor?, Tensor?, bool, float, float, bool) -> (Tensor)`";
+  let arguments = (ins
+    AnyTorchTensorType:$input,
+    AnyTorchOptionalTensorType:$weight,
+    AnyTorchOptionalTensorType:$bias,
+    AnyTorchOptionalTensorType:$running_mean,
+    AnyTorchOptionalTensorType:$running_var,
+    Torch_BoolType:$use_input_stats,
+    Torch_FloatType:$momentum,
+    Torch_FloatType:$eps,
+    Torch_BoolType:$cudnn_enabled
+  );
+  let results = (outs
+    AnyTorchTensorType:$result
+  );
+  let hasCustomAssemblyFormat = 1;
+  let extraClassDefinition = [{
+    ParseResult AtenInstanceNormOp::parse(OpAsmParser &parser, OperationState &result) {
+      return parseDefaultTorchOp(parser, result, 9, 1);
+    }
+    void AtenInstanceNormOp::print(OpAsmPrinter &printer) {
+      printDefaultTorchOp(printer, *this, 9, 1);
+    }
+  }];
+}
+
+def Torch_AtenGroupNormOp : Torch_Op<"aten.group_norm", [
+    AllowsTypeRefinement,
+    HasValueSemantics,
+    ReadOnly
+  ]> {
+  let summary = "Generated op for `aten::group_norm : (Tensor, int, Tensor?, Tensor?, float, bool) -> (Tensor)`";
+  let arguments = (ins
+    AnyTorchTensorType:$input,
+    Torch_IntType:$num_groups,
+    AnyTorchOptionalTensorType:$weight,
+    AnyTorchOptionalTensorType:$bias,
+    Torch_FloatType:$eps,
+    Torch_BoolType:$cudnn_enabled
+  );
+  let results = (outs
+    AnyTorchTensorType:$result
+  );
+  let hasCustomAssemblyFormat = 1;
+  let extraClassDefinition = [{
+    ParseResult AtenGroupNormOp::parse(OpAsmParser &parser, OperationState &result) {
+      return parseDefaultTorchOp(parser, result, 6, 1);
+    }
+    void AtenGroupNormOp::print(OpAsmPrinter &printer) {
+      printDefaultTorchOp(printer, *this, 6, 1);
+    }
+  }];
+}
+
 def Torch_AtenMaxPool2dOp : Torch_Op<"aten.max_pool2d", [
     AllowsTypeRefinement,
     HasValueSemantics,
@@ -7233,9 +7292,10 @@ def Torch_AtenOnesLikeOp : Torch_Op<"aten.ones_like", [
 }
 
 def Torch_AtenEmptyMemoryFormatOp : Torch_Op<"aten.empty.memory_format", [
+    Pure,
     AllowsTypeRefinement,
     HasValueSemantics,
-    ReadOnly
+    ReadOnly,
   ]> {
   let summary = "Generated op for `aten::empty.memory_format : (int[], int?, int?, Device?, bool?, int?) -> (Tensor)`";
   let arguments = (ins
@@ -7742,6 +7802,31 @@ def Torch_AtenMaxOp : Torch_Op<"aten.max", [
   }];
 }
 
+def Torch_AtenAmaxOp : Torch_Op<"aten.amax", [
+    AllowsTypeRefinement,
+    HasValueSemantics,
+    ReadOnly
+  ]> {
+  let summary = "Generated op for `aten::amax : (Tensor, int[]?, bool) -> Tensor`";
+  let arguments = (ins
+    AnyTorchTensorType:$self,
+    AnyTorchOptionalListOfTorchIntType:$dim,
+    Torch_BoolType:$keepdim
+  );
+  let results = (outs
+    AnyTorchTensorType:$results
+  );
+  let hasCustomAssemblyFormat = 1;
+  let extraClassDefinition = [{
+    ParseResult AtenAmaxOp::parse(OpAsmParser &parser, OperationState &result) {
+      return parseDefaultTorchOp(parser, result, 3, 1);
+    }
+    void AtenAmaxOp::print(OpAsmPrinter &printer) {
+      printDefaultTorchOp(printer, *this, 3, 1);
+    }
+  }];
+}
+
 def Torch_AtenMaxDimOp : Torch_Op<"aten.max.dim", [
     AllowsTypeRefinement,
     HasValueSemantics,
@@ -7764,31 +7849,6 @@ def Torch_AtenMaxDimOp : Torch_Op<"aten.max.dim", [
     }
     void AtenMaxDimOp::print(OpAsmPrinter &printer) {
       printDefaultTorchOp(printer, *this, 3, 2);
-    }
-  }];
-}
-
-def Torch_AtenAmaxOp : Torch_Op<"aten.amax", [
-    AllowsTypeRefinement,
-    HasValueSemantics,
-    ReadOnly
-  ]> {
-  let summary = "Generated op for `aten::amax : (Tensor, int[], bool) -> (Tensor)`";
-  let arguments = (ins
-    AnyTorchTensorType:$self,
-    AnyTorchListOfTorchIntType:$dim,
-    Torch_BoolType:$keepdim
-  );
-  let results = (outs
-    AnyTorchTensorType:$result
-  );
-  let hasCustomAssemblyFormat = 1;
-  let extraClassDefinition = [{
-    ParseResult AtenAmaxOp::parse(OpAsmParser &parser, OperationState &result) {
-      return parseDefaultTorchOp(parser, result, 3, 1);
-    }
-    void AtenAmaxOp::print(OpAsmPrinter &printer) {
-      printDefaultTorchOp(printer, *this, 3, 1);
     }
   }];
 }

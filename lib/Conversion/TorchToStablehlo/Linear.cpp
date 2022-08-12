@@ -73,50 +73,57 @@ Value getPermutedTensor(PatternRewriter &rewriter, Operation *op, Value input,
 }
 
 RankedTensorType castContractingDim(PatternRewriter &rewriter, Operation *op,
-                                    Value &lhs, Value &rhs,
+                                    Value &lhs, Value &rhs, int64_t nBatchDims,
                                     int64_t lhsResultDim, int64_t rhsResultDim,
                                     int64_t lhsContractingDim,
                                     int64_t rhsContractingDim) {
   auto lhsTy = lhs.getType().dyn_cast<RankedTensorType>();
   auto rhsTy = rhs.getType().dyn_cast<RankedTensorType>();
 
+  bool shouldCastLhs = false;
+  bool shouldCastRhs = false;
   auto oldLhsShape = lhsTy.getShape();
   auto oldRhsShape = rhsTy.getShape();
   SmallVector<int64_t> lhsShape;
   SmallVector<int64_t> rhsShape;
+  SmallVector<int64_t> outShape;
+
   lhsShape.append(oldLhsShape.begin(), oldLhsShape.end());
   rhsShape.append(oldRhsShape.begin(), oldRhsShape.end());
+  // set batch dims
+  for (auto k = 0; k < nBatchDims; ++k) {
+    if (lhsShape[k] == ShapedType::kDynamic && rhsShape[k] >= 0) {
+      lhsShape[k] = rhsShape[k];
+      shouldCastLhs = true;
+    }
+    if (rhsShape[k] == ShapedType::kDynamic && lhsShape[k] >= 0) {
+      rhsShape[k] = lhsShape[k];
+      shouldCastRhs = true;
+    }
+    outShape.push_back(lhsShape[k]);
+  }
+  // set contracting dims
   auto lhsContractingDimSize = lhsShape[lhsContractingDim];
   auto rhsContractingDimSize = rhsShape[rhsContractingDim];
   if (lhsContractingDimSize != rhsContractingDimSize) {
     if (lhsContractingDimSize == ShapedType::kDynamic &&
         rhsContractingDimSize >= 0) {
       lhsShape[lhsContractingDim] = rhsContractingDimSize;
-      auto newRankTy = RankedTensorType::get(lhsShape, lhsTy.getElementType());
-      lhs = rewriter.create<tensor::CastOp>(op->getLoc(), newRankTy, lhs);
+      shouldCastLhs = true;
     } else if (rhsContractingDimSize == ShapedType::kDynamic &&
                lhsContractingDimSize >= 0) {
       rhsShape[rhsContractingDim] = lhsContractingDimSize;
-      auto newRankTy = RankedTensorType::get(rhsShape, rhsTy.getElementType());
-      rhs = rewriter.create<tensor::CastOp>(op->getLoc(), newRankTy, rhs);
+      shouldCastRhs = true;
     }
   }
-  SmallVector<int64_t> outShape;
-  // set batch dims, will skip invalid dimensions
-  for (int64_t k = 0; k < static_cast<int64_t>(lhsShape.size()); ++k) {
-    if (k == lhsResultDim || k == lhsContractingDim)
-      continue;
-    outShape.push_back(lhsShape[k]);
+  if (shouldCastLhs) {
+    auto newRankTy = RankedTensorType::get(lhsShape, lhsTy.getElementType());
+    lhs = rewriter.create<tensor::CastOp>(op->getLoc(), newRankTy, lhs);
   }
-  for (int64_t k = 0, b = 0; k < static_cast<int64_t>(rhsShape.size()); ++k) {
-    if (b >= static_cast<int64_t>(outShape.size()))
-      break;
-    if (k == rhsResultDim || k == rhsContractingDim)
-      continue;
-    if (outShape[b] == ShapedType::kDynamic && rhsShape[k] >= 0) {
-      outShape[b] = rhsShape[k];
-    }
-    b++;
+
+  if (shouldCastRhs) {
+    auto newRankTy = RankedTensorType::get(rhsShape, rhsTy.getElementType());
+    rhs = rewriter.create<tensor::CastOp>(op->getLoc(), newRankTy, rhs);
   }
 
   // set result dimensions
@@ -226,9 +233,57 @@ public:
       return success();
     }
 
+    // For lhsRank > 2 and rhsRrank == 2, use dynamicReshapeOp to convert lhs to
+    // 2-D Tensor. Then use Dot op to perform matrix * vector/matrix, and
+    // finnally reshape to right shape. It avoids extra data copy and compute.
+
+    auto loc = op->getLoc();
     const auto &options = ConvertAtenOp<AtenOpT>::getOptions();
+    if (rhsRank == 2) {
+      SmallVector<Value> resultDims;
+      auto dotLhsTy = RankedTensorType::get(
+          {lhsRank == 2 ? lhsTy.getShape()[0] : ShapedType::kDynamic,
+           lhsTy.getShape()[lhsRank - 1]},
+          lhsElemTy);
+      Type intType = rewriter.getIntegerType(options.dimSizeIndexBits);
+      Value numel = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getIntegerAttr(intType, 1));
+      // reshape lhs to 2-D tensor and record output shape
+      for (int i = 0; i < lhsRank - 1; ++i) {
+        // May use create or fold.
+        Value dimValue = rewriter.create<tensor::DimOp>(loc, lhs, i);
+        resultDims.push_back(dimValue);
+        numel = rewriter.createOrFold<arith::MulIOp>(
+            loc, numel,
+            rewriter.create<arith::IndexCastOp>(loc, intType, dimValue));
+      }
+      Value lhsLastRankDim = rewriter.create<arith::IndexCastOp>(
+          loc, intType, rewriter.create<tensor::DimOp>(loc, lhs, lhsRank - 1));
+      resultDims.push_back(rewriter.create<tensor::DimOp>(loc, rhs, 1));
+      Value reshapeDim =
+          rewriter
+              .create<mlir::tensor::FromElementsOp>(
+                  op->getLoc(), ValueRange{numel, lhsLastRankDim})
+              .getResult();
+      lhs = rewriter.create<stablehlo::DynamicReshapeOp>(loc, dotLhsTy, lhs,
+                                                         reshapeDim);
+      auto outTy =
+          ConvertAtenOp<AtenOpT>::getTypeConverter()->convertType(op.getType());
+      auto dotType = RankedTensorType::get(
+          {lhsRank == 1 ? lhsTy.getShape()[0] : ShapedType::kDynamic,
+           rhsTy.getShape()[1]},
+          outTy.template cast<RankedTensorType>().getElementType());
+      Value matmulOutput =
+          rewriter.create<stablehlo::DotOp>(loc, dotType, lhs, rhs, nullptr);
+      // reshape result to output shape
+      output = rewriter.create<stablehlo::DynamicReshapeOp>(
+          loc, outTy, matmulOutput,
+          rewriter.create<mlir::tensor::FromElementsOp>(loc, resultDims));
+      return success();
+    }
+
     int64_t nBatchDims;
-    if (rhsRank <= 2) {
+    if (rhsRank == 1) {
       auto leadingRank = lhsRank - 2;
       getBmmBroadcast(rewriter, op, lhs, rhs, leadingRank,
                       options.dimSizeIndexBits);
@@ -264,10 +319,10 @@ public:
             /*lhsContractingDimensions=*/{lhsContractingDim},
             /*rhsContractingDimensions=*/{rhsContractingDim});
     auto outTy =
-        castContractingDim(rewriter, op, lhs, rhs, lhsResultDim, rhsResultDim,
-                           lhsContractingDim, rhsContractingDim);
+        castContractingDim(rewriter, op, lhs, rhs, nBatchDims, lhsResultDim,
+                           rhsResultDim, lhsContractingDim, rhsContractingDim);
     output = rewriter
-                 .create<stablehlo::DotGeneralOp>(op->getLoc(), outTy, lhs, rhs,
+                 .create<stablehlo::DotGeneralOp>(loc, outTy, lhs, rhs,
                                                   dotDimensionNumbers, nullptr)
                  .getResult();
     return success();
@@ -379,10 +434,10 @@ public:
     auto lhsRank = lhsTy.getRank();
     auto rhsRank = rhsTy.getRank();
 
-    if (lhsRank != 2 && lhsRank != 3)
-      return op.emitError("aten.Linear called but input rank not 2 or 3");
-    if (rhsRank != 2 && rhsRank != 3)
-      return op.emitError("aten.Linear called but weight rank not 2 or 3");
+    if (lhsRank < 1)
+      return op.emitError("aten.Linear called but input rank 0");
+    if (rhsRank != 2)
+      return op.emitError("aten.Linear called but weight rank not 2");
 
     return success();
   }
@@ -428,8 +483,8 @@ public:
     auto rhsContractingDim = nBatchDims;
 
     auto outTy =
-        castContractingDim(rewriter, op, lhs, rhs, lhsResultDim, rhsResultDim,
-                           lhsContractingDim, rhsContractingDim);
+        castContractingDim(rewriter, op, lhs, rhs, nBatchDims, lhsResultDim,
+                           rhsResultDim, lhsContractingDim, rhsContractingDim);
     stablehlo::DotDimensionNumbersAttr dotDimensionNumbers =
         stablehlo::DotDimensionNumbersAttr::get(
             rewriter.getContext(),
@@ -785,7 +840,7 @@ public:
     const auto &options = getOptions();
     bias = *hlo::unsqueezeTensor(rewriter, op, bias, inputUnsqzDims,
                                  options.dimSizeIndexBits);
-    bias = hlo::promoteType(rewriter, bias, outTy);
+    bias = hlo::promoteType(rewriter, op.getLoc(), bias, outTy);
 
     DenseIntElementsAttr bcastDimensions;
     rewriter.replaceOpWithNewOp<chlo::BroadcastAddOp>(
