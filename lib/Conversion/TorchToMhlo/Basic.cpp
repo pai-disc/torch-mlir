@@ -308,15 +308,10 @@ public:
     } else if (!rhsType) {
       rhs = mhlo::scalarToMhloTensor(rewriter, op, adaptor.other(), outElemTy);
     }
-    DenseIntElementsAttr bcastDimensions;
-    lhs = mhlo::promoteType(rewriter, lhs, outType);
-    rhs = mhlo::promoteType(rewriter, rhs, outType);
-    auto loc = op.getLoc();
-    Value result =
-        rewriter.create<ChloOpT>(loc, outType, lhs, rhs, bcastDimensions);
-
     if (!isa<AtenDivTensorModeOp>(op)) {
-      rewriter.replaceOp(op, result);
+      lhs = mhlo::promoteType(rewriter, lhs, outType);
+      rhs = mhlo::promoteType(rewriter, rhs, outType);
+      rewriter.replaceOpWithNewOp<ChloOpT>(op, outType, lhs, rhs, nullptr);
       return success();
     }
 
@@ -327,6 +322,17 @@ public:
                       m_TorchConstantStr(roundingMode)))
       return rewriter.notifyMatchFailure(
           op, "only support constant str rounding mode");
+
+    auto computeTy = outType;
+    if (outElemTy.isIntOrIndex()) {
+      computeTy =
+          RankedTensorType::get(outType.getShape(), rewriter.getF32Type());
+    }
+    lhs = mhlo::promoteType(rewriter, lhs, computeTy);
+    rhs = mhlo::promoteType(rewriter, rhs, computeTy);
+    auto loc = op.getLoc();
+    auto result =
+        rewriter.create<ChloOpT>(loc, computeTy, lhs, rhs, nullptr).getResult();
 
     if (roundingMode == "trunc") {
       // "trunc" - rounds the results of the division towards zero. Equivalent
@@ -341,7 +347,7 @@ public:
       // floor division in Python (the // operator)
       result = rewriter.create<mhlo::FloorOp>(loc, result).getResult();
     }
-    rewriter.replaceOp(op, result);
+    rewriter.replaceOpWithNewOp<mhlo::ConvertOp>(op, outType, result);
     return success();
   }
 };

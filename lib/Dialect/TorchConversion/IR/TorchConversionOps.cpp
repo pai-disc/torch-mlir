@@ -121,6 +121,32 @@ OpFoldResult ToI64Op::fold(llvm::ArrayRef<mlir::Attribute> operands) {
 }
 
 //===----------------------------------------------------------------------===//
+// FromI1Op
+//===----------------------------------------------------------------------===//
+
+OpFoldResult FromI1Op::fold(llvm::ArrayRef<mlir::Attribute> operands) {
+  auto attr = operands[0].dyn_cast_or_null<mlir::IntegerAttr>();
+  if (attr) {
+    return attr;
+  } else {
+    return nullptr;
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// ToI1Op
+//===----------------------------------------------------------------------===//
+
+OpFoldResult ToI1Op::fold(llvm::ArrayRef<mlir::Attribute> operands) {
+  auto attr = operands[0].dyn_cast_or_null<mlir::IntegerAttr>();
+  if (attr) {
+    return attr;
+  } else {
+    return nullptr;
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // ToF64Op
 //===----------------------------------------------------------------------===//
 

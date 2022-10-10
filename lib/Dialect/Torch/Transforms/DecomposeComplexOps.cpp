@@ -2106,7 +2106,7 @@ class DecomposeAtenNativeBatchNormOp
         loc, runningVar.getType(), runningVar, eps, /*alpha=*/one);
     Value invStd = rewriter.create<AtenRsqrtOp>(loc, varEps.getType(), varEps);
     Value normalizedInput = rewriter.create<AtenMulTensorOp>(
-        loc, inputSubMean.getType(), inputSubMean, invStd);
+        loc, op.getType(0), inputSubMean, invStd);
 
     // The `weight` and `bias` must be reshaped to (1, C, 1?, 1?, 1?) to make it
     // broadcast-compatible with (N, C, D?, H?, W?).
@@ -2121,7 +2121,7 @@ class DecomposeAtenNativeBatchNormOp
       weight = rewriter.create<AtenViewOp>(loc, reshapeType, weight,
                                            runningStatsSizeList);
       batchNormOutput = rewriter.create<AtenMulTensorOp>(
-          loc, batchNormOutput.getType(), batchNormOutput, weight);
+          loc, op.getType(0), batchNormOutput, weight);
     }
     if (!bias.getType().isa<Torch::NoneType>()) {
       // Rank of `bias` must be exactly 1.
@@ -2130,7 +2130,7 @@ class DecomposeAtenNativeBatchNormOp
       bias = rewriter.create<AtenViewOp>(loc, reshapeType, bias,
                                          runningStatsSizeList);
       batchNormOutput = rewriter.create<AtenAddTensorOp>(
-          loc, batchNormOutput.getType(), batchNormOutput, bias, /*alpha=*/one);
+          loc, op.getType(0), batchNormOutput, bias, /*alpha=*/one);
     }
 
     // The `mean` and `invstd` outputs are empty tensors in inference mode.
