@@ -21,7 +21,7 @@
 #include "mlir-c/Diagnostics.h"
 #include "torch-mlir-c/TorchTypes.h"
 
-#if TORCH_VERSION_LT(1, 12)
+#if TORCH_VERSION_LT(1, 15)
 // do nothing
 #else
 #include "ATen/native/quantized/packed_params.h"
@@ -373,7 +373,7 @@ MlirValue IValueImporter::rawImportIValue(c10::IValue ivalue) {
                                  torchMlirTorchNoneTypeGet(context));
     return mlirOperationGetResult(operation, 0);
   }
-#if TORCH_VERSION_LT(1, 12)
+#if TORCH_VERSION_LT(1, 15)
   // do nothing
 #else
   if (ivalue.isCustomClass()) {

@@ -6091,6 +6091,31 @@ def Torch_AtenMaxOp : Torch_Op<"aten.max", [
   }];
 }
 
+def Torch_AtenAmaxOp : Torch_Op<"aten.amax", [
+    AllowsTypeRefinement,
+    HasValueSemantics,
+    ReadOnly
+  ]> {
+  let summary = "Generated op for `aten::amax : (Tensor, int[]?, bool) -> Tensor`";
+  let arguments = (ins
+    AnyTorchTensorType:$self,
+    AnyTorchOptionalListOfTorchIntType:$dim,
+    Torch_BoolType:$keepdim
+  );
+  let results = (outs
+    AnyTorchTensorType:$results
+  );
+  let hasCustomAssemblyFormat = 1;
+  let extraClassDefinition = [{
+    ParseResult AtenAmaxOp::parse(OpAsmParser &parser, OperationState &result) {
+      return parseDefaultTorchOp(parser, result, 3, 1);
+    }
+    void AtenAmaxOp::print(OpAsmPrinter &printer) {
+      printDefaultTorchOp(printer, *this, 3, 1);
+    }
+  }];
+}
+
 def Torch_AtenMaxDimOp : Torch_Op<"aten.max.dim", [
     AllowsTypeRefinement,
     HasValueSemantics,

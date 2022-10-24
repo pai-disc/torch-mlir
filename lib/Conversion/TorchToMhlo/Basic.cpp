@@ -113,16 +113,19 @@ public:
     if (!selfTy)
       return op.emitError("only Tensor types supported in MHLO");
 
-    if (selfTy.getElementType().isa<mlir::FloatType>()) {
+    auto outTy = OpConversionPattern<AtenOpT>::getTypeConverter()->convertType(
+        op.getType());
+    if (selfTy != outTy) {
+      auto out = rewriter.create<MhloOpT>(op.getLoc(), selfTy, self);
+      rewriter.replaceOpWithNewOp<tensor::CastOp>(op, outTy, out);
+      return success();
+    } else {
       rewriter.replaceOpWithNewOp<MhloOpT>(
           op,
           OpConversionPattern<AtenOpT>::getTypeConverter()->convertType(
               op.getType()),
           self);
       return success();
-    } else {
-      return op.emitError(
-          "only floating-point datatype legalization supported");
     }
   }
 };
