@@ -221,14 +221,59 @@ public:
       return op.emitError("matmul: inputs can't be 0-rank");
     }
 
+    const auto &options = ConvertAtenOp<AtenOpT>::getOptions();
+    auto loc = op->getLoc();
+
     if (lhsRank <= 2 && rhsRank <= 2) {
-      output = rewriter.create<mhlo::DotOp>(op->getLoc(), lhs, rhs, nullptr);
+      output = rewriter.create<mhlo::DotOp>(loc, lhs, rhs, nullptr);
       return success();
     }
 
-    const auto &options = ConvertAtenOp<AtenOpT>::getOptions();
+    // for lhsRank > 2 and rhsRrank == 2
+    // use dynamicReshapeOp to convert lhs to 2-D Tensor,
+    // then use Dot op to perform matrix * vector/matrix,
+    // and finnally reshape to right shape,
+    // to avoid extra data copy and compute.
+
+    if (rhsRank == 2) {
+      SmallVector<Value> resultDims;
+      auto dotLhsTy = RankedTensorType::get(
+          {ShapedType::kDynamicSize, lhsTy.getShape()[lhsRank - 1]}, lhsElemTy);
+      Type intType = rewriter.getIntegerType(options.dimSizeIndexBits);
+      Value numel = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getIntegerAttr(intType, 1));
+      // reshape lhs to 2-D tensor and record output shape
+      for (int i = 0; i < lhsRank - 1; ++i) {
+        Value dimValue = rewriter.create<tensor::DimOp>(loc, lhs, i);
+        resultDims.push_back(dimValue);
+        numel = rewriter.create<arith::MulIOp>(
+            loc, numel,
+            rewriter.create<arith::IndexCastOp>(loc, intType, dimValue));
+      }
+      Value lhsLastRankDim = rewriter.create<arith::IndexCastOp>(
+          loc, intType, rewriter.create<tensor::DimOp>(loc, lhs, lhsRank - 1));
+      if (rhsRank == 2) {
+        resultDims.push_back(rewriter.create<tensor::DimOp>(loc, rhs, 1));
+      }
+      Value reshapeDim =
+          rewriter
+              .create<mlir::tensor::FromElementsOp>(
+                  op->getLoc(), ValueRange{numel, lhsLastRankDim})
+              .getResult();
+      lhs = rewriter.create<mhlo::DynamicReshapeOp>(loc, dotLhsTy, lhs,
+                                                    reshapeDim);
+      Value matmulOutput = rewriter.create<mhlo::DotOp>(loc, lhs, rhs, nullptr);
+      auto outTy =
+          ConvertAtenOp<AtenOpT>::getTypeConverter()->convertType(op.getType());
+      // reshape result to output shape
+      output = rewriter.create<mhlo::DynamicReshapeOp>(
+          loc, outTy, matmulOutput,
+          rewriter.create<mlir::tensor::FromElementsOp>(loc, resultDims));
+      return success();
+    }
+
     int64_t nBatchDims;
-    if (rhsRank <= 2) {
+    if (rhsRank == 1) {
       auto leadingRank = lhsRank - 2;
       getBmmBroadcast(rewriter, op, lhs, rhs, leadingRank,
                       options.dimSizeIndexBits);
@@ -267,7 +312,7 @@ public:
         castContractingDim(rewriter, op, lhs, rhs, nBatchDims, lhsResultDim,
                            rhsResultDim, lhsContractingDim, rhsContractingDim);
     output = rewriter
-                 .create<mhlo::DotGeneralOp>(op->getLoc(), outTy, lhs, rhs,
+                 .create<mhlo::DotGeneralOp>(loc, outTy, lhs, rhs,
                                              dotDimensionNumbers, nullptr)
                  .getResult();
     return success();
@@ -771,7 +816,7 @@ public:
 
     auto nSpatialDims = padding.size();
     auto nDims = inputTy.getRank();
-    
+
     // Kernel size must be constant.
     auto weightShape = weightTy.getShape();
     for (int i = 2; i < nDims; ++i) {
