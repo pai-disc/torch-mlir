@@ -2364,6 +2364,24 @@ class DecomposeConstantTensorNewLikeOp : public OpRewritePattern<OpTy> {
 } // namespace
 
 namespace {
+// Decompose constant tensor like ops.
+template <typename OpTy, typename NewOpTy, int val>
+class DecomposeConstantTensorOp : public OpRewritePattern<OpTy> {
+  using OpRewritePattern<OpTy>::OpRewritePattern;
+  LogicalResult matchAndRewrite(OpTy op,
+                                PatternRewriter &rewriter) const override {
+    Type resultDtype = op.getType().template cast<BaseTensorType>().getDtype();
+    Value fillVal = getConstantWithGivenDtypeAndValue(rewriter, op.getLoc(),
+                                                      val, resultDtype);
+    rewriter.replaceOpWithNewOp<NewOpTy>(op, op.getType(), op.size(), fillVal,
+                                         op.dtype(), op.layout(), op.device(),
+                                         op.pin_memory());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
 // Decompose `aten.full` op into `aten.broadcast_to`
 class DecomposeAtenFullOp : public OpRewritePattern<AtenFullOp> {
 public:
@@ -3546,6 +3564,11 @@ public:
     patterns.add<DecomposeConstantTensorNewLikeOp<AtenNewOnesOp, AtenOnesOp>>(
         context);
     target.addIllegalOp<AtenNewOnesOp>();
+    patterns.add<DecomposeConstantTensorOp<AtenZerosOp, AtenFullOp, 0>>(
+        context);
+    target.addIllegalOp<AtenZerosOp>();
+    patterns.add<DecomposeConstantTensorOp<AtenOnesOp, AtenFullOp, 1>>(context);
+    target.addIllegalOp<AtenOnesOp>();
     patterns.add<DecomposeAtenHardtanhOp>(context);
     target.addIllegalOp<AtenHardtanhOp>();
     patterns.add<DecomposeAtenFullOp>(context);
