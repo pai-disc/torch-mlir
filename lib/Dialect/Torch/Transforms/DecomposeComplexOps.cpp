@@ -334,6 +334,12 @@ public:
     Value result = getSoftmaxResult(op, tensorType, rewriter);
     if (!result)
       return failure();
+
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
     rewriter.replaceOpWithNewOp<TensorStaticInfoCastOp>(op, op.getType(),
                                                         result);
     return success();
@@ -365,6 +371,12 @@ public:
     Value result = getSoftmaxResult(op, tensorType, rewriter);
     if (!result)
       return op.emitError("failed to get softmax result");
+
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
     rewriter.replaceOpWithNewOp<TensorStaticInfoCastOp>(op, op.getType(),
                                                         result);
     return success();
@@ -563,19 +575,21 @@ public:
   LogicalResult matchAndRewrite(AtenLogSoftmaxIntOp op,
                                 PatternRewriter &rewriter) const override {
     Value self = op.self();
-    if (!op.dtype().getType().isa<Torch::NoneType>())
-      return rewriter.notifyMatchFailure(
-          op, "Unimplemented non-None dtype for log_softmax");
-
     BaseTensorType tensorType = self.getType().cast<BaseTensorType>();
     if (!tensorType.hasDtype() || !tensorType.getDtype().isa<mlir::FloatType>())
       return rewriter.notifyMatchFailure(op, "Only support floating type");
 
-    Value logSoftmax = getLogSoftmaxResult(op, rewriter);
-    if (!logSoftmax)
+    Value result = getLogSoftmaxResult(op, rewriter);
+    if (!result)
       return rewriter.notifyMatchFailure(
           op, "getLogSoftmaxResult function returned nullptr");
-    rewriter.replaceOp(op, logSoftmax);
+
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
@@ -597,11 +611,18 @@ public:
     if (halfToFloat)
       return rewriter.notifyMatchFailure(
           op, "halfToFloat is currently not supported.");
-    Value _logSoftmax = getLogSoftmaxResult(op, rewriter);
-    if (!_logSoftmax)
+    Value result = getLogSoftmaxResult(op, rewriter);
+    if (!result)
       return rewriter.notifyMatchFailure(
           op, "getLogSoftmaxResult function returned nullptr");
-    rewriter.replaceOp(op, _logSoftmax);
+
+    BaseTensorType tensorType = op.self().getType().cast<BaseTensorType>();
+    auto outDtype = op.getType().cast<BaseTensorType>().getDtype();
+    if (outDtype != tensorType.getDtype()) {
+      result = convertTensorToDtype(rewriter, op.getLoc(), result, outDtype);
+    }
+
+    rewriter.replaceOp(op, result);
     return success();
   }
 };
