@@ -1371,12 +1371,10 @@ public:
   matchAndRewrite(RuntimeAssertOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     bool condition;
-    if (!matchPattern(op.getCondition(), m_TorchConstantBool(&condition))) {
-      return rewriter.notifyMatchFailure(
-          op, "unimplemented: condition must be a constant");
-    }
-    if (!condition) {
-      return op->emitError("condition must be true");
+    if (matchPattern(op.getCondition(), m_TorchConstantBool(&condition))) {
+      if (!condition) {
+        return op->emitError("condition must be true");
+      }
     }
     rewriter.eraseOp(op);
     return success();
