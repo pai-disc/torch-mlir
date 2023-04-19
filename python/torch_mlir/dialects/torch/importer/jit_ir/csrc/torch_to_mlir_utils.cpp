@@ -376,9 +376,13 @@ MlirAttribute torch_mlir::convertTensorToMlirElementsAttr(at::Tensor tensor,
         shapedType, numElements, static_cast<const double *>(tensorData));
     break;
   case ScalarType::Bool:
-    return mlirDenseElementsAttrBoolGet(shapedType, numElements,
-                                        static_cast<const int *>(tensorData));
+    {
+    int bool2int[numElements];
+    for (unsigned i = 0; i < numElements; ++i)
+      bool2int[i] = *(static_cast<const bool *>(tensorData)+i) ? 1 : 0;
+    return mlirDenseElementsAttrBoolGet(shapedType, numElements, bool2int);
     break;
+    }
   case ScalarType::QInt8:
     return mlirDenseElementsAttrInt8Get(
         shapedType, numElements, static_cast<const int8_t *>(tensorData));
