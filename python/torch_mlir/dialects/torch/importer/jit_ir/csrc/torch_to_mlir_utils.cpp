@@ -377,10 +377,12 @@ MlirAttribute torch_mlir::convertTensorToMlirElementsAttr(at::Tensor tensor,
     break;
   case ScalarType::Bool:
     {
-    int bool2int[numElements];
+    int *bool2int = new int[numElements];
     for (unsigned i = 0; i < numElements; ++i)
       bool2int[i] = *(static_cast<const bool *>(tensorData)+i) ? 1 : 0;
-    return mlirDenseElementsAttrBoolGet(shapedType, numElements, bool2int);
+    auto boolAttr = mlirDenseElementsAttrBoolGet(shapedType, numElements, bool2int);
+    delete[] bool2int;
+    return boolAttr;
     break;
     }
   case ScalarType::QInt8:
