@@ -2192,6 +2192,8 @@ class DecomposeAtenGroupNormOp : public OpRewritePattern<AtenGroupNormOp> {
     Location loc = op.getLoc();
     auto context = op.getContext();
     Value input = op.getInput();
+    auto acc_dtype = rewriter.getF32Type();
+    Value float_input = convertTensorToDtype(rewriter, loc, input, acc_dtype);
     auto inputTy = input.getType().cast<BaseTensorType>();
     if (!inputTy.hasSizes())
       return rewriter.notifyMatchFailure(
@@ -2217,7 +2219,7 @@ class DecomposeAtenGroupNormOp : public OpRewritePattern<AtenGroupNormOp> {
     SmallVector<int64_t, 5> inputForNormTySize(inputRank + 1, kUnknownSize);
     inputForNormTySize[1] = num_groups_int;
     Type inputForNormTy = inputTy.getWithSizesAndDtype(
-        llvm::makeArrayRef(inputForNormTySize), inputTy.getDtype());
+        llvm::makeArrayRef(inputForNormTySize), acc_dtype);
     SmallVector<Value> orginInputSize;
     for (int i = 0; i < inputRank; ++i) {
       Value index =
@@ -2232,14 +2234,14 @@ class DecomposeAtenGroupNormOp : public OpRewritePattern<AtenGroupNormOp> {
     Value inputForNormSizeList = rewriter.create<PrimListConstructOp>(
         loc, ListType::get(IntType::get(context)), inputForNormSize);
     Value reshapedInput = rewriter.create<AtenViewOp>(
-        loc, inputForNormTy, input, inputForNormSizeList);
+        loc, inputForNormTy, float_input, inputForNormSizeList);
     // only keep N, G, reduce G//C, H, W
     int64_t axis = 2;
     std::vector<int64_t> meanVarTySizes(inputForNormTySize.size(), 1);
     for (int i = 0; i < axis; i++)
       meanVarTySizes[i] = inputForNormTySize[i];
     auto meanVarTy = inputTy.getWithSizesAndDtype(
-        llvm::makeArrayRef(meanVarTySizes), inputTy.getDtype());
+        llvm::makeArrayRef(meanVarTySizes), acc_dtype);
     SmallVector<Value> normalizedShapeSize{inputForNormSize.begin() + axis,
                                            inputForNormSize.end()};
     auto normalizedSizeList = rewriter.create<PrimListConstructOp>(
@@ -2251,11 +2253,13 @@ class DecomposeAtenGroupNormOp : public OpRewritePattern<AtenGroupNormOp> {
                 loc, inputForNormTy, meanVarTy, meanVarTy, reshapedInput,
                 normalizedSizeList, none, none, op.getEps())
             .getResult(0);
-    // rehshape back to origin shape
+    // convert dtype and rehshape back to origin shape
+    Value origin_dtype_input =
+        convertTensorToDtype(rewriter, loc, nativeLayerNorm, inputTy.getDtype());
     Value inputSizeList = rewriter.create<PrimListConstructOp>(
         loc, ListType::get(IntType::get(context)), orginInputSize);
     Value originOutput = rewriter.create<AtenViewOp>(
-        loc, op.getType(), nativeLayerNorm, inputSizeList);
+        loc, op.getType(), origin_dtype_input, inputSizeList);
     // reshape weight and bias to [1, C, 1, 1]
     Value weight = op.getWeight();
     Value bias = op.getBias();
@@ -3299,6 +3303,11 @@ class DecomposeAtenBaddbmmOp : public OpRewritePattern<AtenBaddbmmOp> {
         rewriter.create<AtenBmmOp>(loc, op.getType(), op.getBatch1(), op.getBatch2());
     Value alphaTimesBmm =
         rewriter.create<AtenMulScalarOp>(loc, op.getType(), bmm, op.getAlpha());
+          double beta;
+  if (matchPattern(op.getBeta(), m_TorchConstantFloat(&beta)) and beta == 0.0f) {
+    rewriter.replaceOp(op, {alphaTimesBmm});
+    return success();
+  }
     Value input = op.getSelf();
     BaseTensorType inputType = input.getType().cast<BaseTensorType>();
     BaseTensorType resultType =
