@@ -2164,6 +2164,12 @@ class DecomposeAtenLayerNormOp : public OpRewritePattern<AtenLayerNormOp> {
     Location loc = op.getLoc();
 
     auto input = op.getInput().getType().cast<BaseTensorType>();
+    auto acc_dtype = rewriter.getF32Type();
+    Value float_input = convertTensorToDtype(rewriter, loc, op.getInput(), acc_dtype);
+    Value float_weight = op.getWeight().getType().isa<Torch::NoneType>() ? op.getWeight() : convertTensorToDtype(rewriter, loc, op.getWeight(), acc_dtype);
+    Value float_bias = op.getBias().getType().isa<Torch::NoneType>() ? op.getBias() : convertTensorToDtype(rewriter, loc, op.getBias(), acc_dtype);
+    auto normType = input.getWithSizesAndDtype(
+        llvm::makeArrayRef(op.getType().cast<BaseTensorType>().getSizes()), acc_dtype);
     if (!input.hasSizes())
       return rewriter.notifyMatchFailure(
           op, "input tensor should have known sizes.");
@@ -2176,11 +2182,12 @@ class DecomposeAtenLayerNormOp : public OpRewritePattern<AtenLayerNormOp> {
     for (int i = 0; i < axis; i++)
       meanVarSizes[i] = input.getSizes()[i];
     auto meanVarType = input.getWithSizesAndDtype(llvm::ArrayRef(meanVarSizes),
-                                                  input.getOptionalDtype());
+                                                  acc_dtype);
     auto nativeLayerNorm = rewriter.create<AtenNativeLayerNormOp>(
-        loc, op.getType(), meanVarType, meanVarType, op.getInput(),
-        op.getNormalizedShape(), op.getWeight(), op.getBias(), op.getEps());
-    rewriter.replaceOp(op, nativeLayerNorm.getResult(0));
+        loc, normType, meanVarType, meanVarType, float_input,
+        op.getNormalizedShape(), float_weight, float_bias, op.getEps());
+    auto output = convertTensorToDtype(rewriter, loc, nativeLayerNorm.getResult(0), input.getDtype());
+    rewriter.replaceOp(op, {output});
     return success();
   }
 };
